@@ -1,3 +1,4 @@
+// unfiltered code
 #include "I2C.h"
 #include "Wire.h"
 
@@ -48,6 +49,11 @@ struct {
   float temperature;
 } normalized;
 
+// Orientation variables
+struct {
+  float roll, pitch, yaw;
+} orientation;
+
 unsigned long lastPrintMillis = 0;
 
 // Function declarations
@@ -60,6 +66,7 @@ void normalize(magnetometer_raw magnetometer);
 bool isMagnetometerReady();
 void readRawMagnetometer();
 void setMagnetometerAdjustmentValues();
+void calculateOrientation();
 
 void setup() {
   Wire.begin();
@@ -92,6 +99,8 @@ void loop() {
     normalize(gyroscope);
     normalize(accelerometer);
     normalize(temperature);
+
+    calculateOrientation();
   }
 
   if (isMagnetometerReady()) {
@@ -133,6 +142,16 @@ void loop() {
     Serial.print(normalized.magnetometer.y, 3);
     Serial.print("\t\t");
     Serial.print(normalized.magnetometer.z, 3);
+    Serial.println();
+
+    Serial.println();
+
+    Serial.print("ORIENTATION:\t");
+    Serial.print(orientation.roll, 2);
+    Serial.print("\t\t");
+    Serial.print(orientation.pitch, 2);
+    Serial.print("\t\t");
+    Serial.print(orientation.yaw, 2);
     Serial.println();
 
     Serial.println();
@@ -247,4 +266,41 @@ void readRawMagnetometer() {
   magnetometer.x = (buff[1] << 8 | buff[0]);
   magnetometer.y = (buff[3] << 8 | buff[2]);
   magnetometer.z = (buff[5] << 8 | buff[4]);
+}
+
+// Orientation calculation function
+void calculateOrientation() {
+  // Calculate roll and pitch from accelerometer data
+  // Roll: rotation around X-axis
+  orientation.roll =
+      atan2(normalized.accelerometer.y,
+            sqrt(normalized.accelerometer.x * normalized.accelerometer.x +
+                 normalized.accelerometer.z * normalized.accelerometer.z)) *
+      180.0 / PI;
+
+  // Pitch: rotation around Y-axis
+  orientation.pitch =
+      atan2(-normalized.accelerometer.x,
+            sqrt(normalized.accelerometer.y * normalized.accelerometer.y +
+                 normalized.accelerometer.z * normalized.accelerometer.z)) *
+      180.0 / PI;
+
+  // Yaw calculation from magnetometer (simple approach)
+  // Note: This is a basic calculation and will be improved with Kalman
+  // filtering later
+  float mag_x =
+      normalized.magnetometer.x * cos(orientation.pitch * PI / 180.0) +
+      normalized.magnetometer.z * sin(orientation.pitch * PI / 180.0);
+  float mag_y = normalized.magnetometer.x * sin(orientation.roll * PI / 180.0) *
+                    sin(orientation.pitch * PI / 180.0) +
+                normalized.magnetometer.y * cos(orientation.roll * PI / 180.0) -
+                normalized.magnetometer.z * sin(orientation.roll * PI / 180.0) *
+                    cos(orientation.pitch * PI / 180.0);
+
+  orientation.yaw = atan2(-mag_y, mag_x) * 180.0 / PI;
+
+  // Normalize yaw to 0-360 degrees
+  if (orientation.yaw < 0) {
+    orientation.yaw += 360.0;
+  }
 }
