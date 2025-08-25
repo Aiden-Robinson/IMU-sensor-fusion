@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  ros2_imu:
+    build: .
+    container_name: ros2_imu_visualization
+    privileged: true  # Needed for serial port access
+    network_mode: host  # Needed for ROS2 communication
+    environment:
+      - DISPLAY=${DISPLAY}
+      - SERIAL_PORT=${SERIAL_PORT:-/dev/ttyACM0}
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /dev:/dev  # Mount device directory for serial access
+    devices:
+      - /dev/ttyACM0:/dev/ttyACM0  # Mount specific serial device (change as needed)
+    stdin_open: true
+    tty: true

@@ -50,7 +50,18 @@ pip install -r requirements.txt
 ```
 ├── imu/
 │   └── imu.ino           # Arduino sketch for MPU9250 sensor reading
-├── plot_imu.py           # Python script for data visualization
+├── ros2_imu_package/     # ROS2 package for RVIZ visualization
+│   ├── ros2_imu_package/
+│   │   ├── imu_serial_reader.py    # ROS2 node for serial communication
+│   │   └── imu_tf_broadcaster.py   # TF broadcaster for RVIZ
+│   ├── launch/
+│   │   └── imu_visualization.launch.py  # Launch file
+│   ├── config/
+│   │   ├── imu_params.yaml         # Configuration parameters
+│   │   └── imu_visualization.rviz  # RVIZ setup
+│   └── README.md         # ROS2 package documentation
+├── test_serial.py        # Python script for testing serial communication
+├── visualize_3d.py       # Python script for 3D visualization (legacy)
 ├── requirements.txt      # Python dependencies
 └── README.md            # This file
 ```
@@ -76,18 +87,69 @@ ACC (m/s^2):  0.750     -0.564     -9.829
 MAG (μT):     307.950   3417.000   -3081.750
 ```
 
-### 3. Data Visualization (Optional)
+### 3. Data Visualization
+
+**Option A: Docker + ROS2 + RVIZ (🔥 Recommended - Works on Linux & Windows)**
+
+**🚀 Ultra-Simple Setup:**
+```bash
+# Linux
+./docker_setup.sh
+
+# Windows
+docker_setup.bat
+
+# With custom serial port
+./docker_setup.sh -p /dev/ttyUSB0    # Linux
+docker_setup.bat -p COM4             # Windows
+```
+
+See [DOCKER_README.md](DOCKER_README.md) for complete Docker setup guide.
+
+**Option B: Native ROS2 + RVIZ (Linux only)**
+
+**🚀 One-Command Setup:**
+```bash
+# Complete automated setup and launch
+./setup_ros2_imu.sh
+
+# Or with custom serial port
+./setup_ros2_imu.sh -p /dev/ttyUSB0
+
+# Or just setup without launching
+./setup_ros2_imu.sh --no-launch
+```
+
+**Manual Setup:**
+See the [ROS2 package README](ros2_imu_package/README.md) for complete setup instructions.
+
+```bash
+# Build the ROS2 package
+cd ros2_imu_package
+colcon build
+source install/setup.bash
+
+# Launch RVIZ visualization
+ros2 launch ros2_imu_package imu_visualization.launch.py serial_port:=/dev/ttyACM0
+```
+
+**Option C: Python Matplotlib (Legacy)**
 
 Run the Python plotting script to visualize sensor data:
 
 ```bash
-python plot_imu.py
+python visualize_3d.py
 ```
 
 ## Serial Port Notes (Linux vs Windows)
 
 - **Windows**: Serial ports are named like `COM3`, `COM4`, etc.
 - **Linux**: Serial ports are named like `/dev/ttyACM0` or `/dev/ttyUSB0`. Use `ls /dev/tty*` to list available ports. Make sure you have permission to access the port (you may need to add your user to the `dialout` group: `sudo usermod -aG dialout $USER` and then log out/in).
+
+**For ROS2 users**: The ROS2 package includes a utility script to list available serial ports:
+```bash
+python3 ros2_imu_package/scripts/list_serial_ports.py
+```
 
 ## Understanding the Data
 

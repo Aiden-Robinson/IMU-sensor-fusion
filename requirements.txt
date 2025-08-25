@@ -3,3 +3,13 @@ matplotlib
 numpy
 scipy
 pygame
+
+# ROS2 Python dependencies (install via apt for ROS2)
+# ros-humble-rclpy
+# ros-humble-sensor-msgs
+# ros-humble-geometry-msgs
+# ros-humble-std-msgs
+# ros-humble-tf2-ros
+# ros-humble-rviz2
+# ros-humble-robot-state-publisher
+# ros-humble-rviz-imu-plugin
