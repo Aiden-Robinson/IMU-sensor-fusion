@@ -62,6 +62,8 @@ pip install -r requirements.txt
 1. Install the I2C library in Arduino IDE
 2. Upload `imu/imu.ino` to your Arduino
 3. Open Serial Monitor (115200 baud) to view sensor readings
+   - **Windows**: Serial port will look like `COM3`, `COM4`, etc.
+   - **Linux**: Serial port will look like `/dev/ttyACM0` or `/dev/ttyUSB0` (use `ls /dev/tty*` to find it)
 
 ### 2. Expected Output
 
@@ -81,6 +83,11 @@ Run the Python plotting script to visualize sensor data:
 ```bash
 python plot_imu.py
 ```
+
+## Serial Port Notes (Linux vs Windows)
+
+- **Windows**: Serial ports are named like `COM3`, `COM4`, etc.
+- **Linux**: Serial ports are named like `/dev/ttyACM0` or `/dev/ttyUSB0`. Use `ls /dev/tty*` to list available ports. Make sure you have permission to access the port (you may need to add your user to the `dialout` group: `sudo usermod -aG dialout $USER` and then log out/in).
 
 ## Understanding the Data
 

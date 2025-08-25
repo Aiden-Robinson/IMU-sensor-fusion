@@ -19,7 +19,7 @@ def test_serial_connection(port='COM3', baudrate=115200):
         
         while True:
             if ser.in_waiting:
-                line = ser.readline().decode('utf-8').strip()
+                line = ser.readline().decode('utf-8', errors='replace').strip()
                 print(line)
                 
     except KeyboardInterrupt:
