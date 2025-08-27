@@ -117,11 +117,28 @@ class IMUSerialReader(Node):
                     
             # Parse orientation data
             elif line.startswith("ORIENTATION:"):
-                parts = line.split('\t')
+                # Debug: Print the raw line to see what we're trying to parse
+                self.get_logger().info(f'PARSING RAW LINE: "{line}"')
+                
+                # Split by any whitespace and filter out empty strings
+                parts = [part for part in line.split() if part]
+                self.get_logger().info(f'FILTERED PARTS: {parts} (length: {len(parts)})')
+                
                 if len(parts) >= 4:
-                    self.roll = math.radians(float(parts[1]))   # Convert to radians
-                    self.pitch = math.radians(float(parts[2]))
-                    self.yaw = math.radians(float(parts[3]))
+                    try:
+                        roll_deg = float(parts[1])
+                        pitch_deg = float(parts[2]) 
+                        yaw_deg = float(parts[3])
+                        self.get_logger().info(f'PARSED VALUES: Roll={roll_deg}°, Pitch={pitch_deg}°, Yaw={yaw_deg}°')
+                        
+                        self.roll = math.radians(roll_deg)   # Convert to radians
+                        self.pitch = math.radians(pitch_deg)
+                        self.yaw = math.radians(yaw_deg)
+                        self.get_logger().info(f'CONVERTED TO RADIANS: Roll={self.roll:.4f}, Pitch={self.pitch:.4f}, Yaw={self.yaw:.4f}')
+                    except ValueError as e:
+                        self.get_logger().error(f'Failed to parse orientation values: {e}')
+                else:
+                    self.get_logger().warn(f'Insufficient orientation parts: expected 4, got {len(parts)}')
                     
         except (ValueError, IndexError) as e:
             # Silently ignore parsing errors to avoid spam
@@ -141,11 +158,38 @@ class IMUSerialReader(Node):
             imu_msg.header.frame_id = self.frame_id
             
             # Convert roll, pitch, yaw to quaternion
+            # Try default quaternion conversion (should work for most cases)
             quaternion = quaternion_from_euler(self.roll, self.pitch, self.yaw)
             imu_msg.orientation.x = quaternion[0]
             imu_msg.orientation.y = quaternion[1]
             imu_msg.orientation.z = quaternion[2]
             imu_msg.orientation.w = quaternion[3]
+            
+            # Debug logging every 50 messages (once per second at 50Hz)
+            if hasattr(self, '_msg_count'):
+                self._msg_count += 1
+            else:
+                self._msg_count = 0
+                
+            if self._msg_count % 25 == 0:  # More frequent logging
+                self.get_logger().info(
+                    f'EULER INPUT - Roll: {math.degrees(self.roll):.2f}°, '
+                    f'Pitch: {math.degrees(self.pitch):.2f}°, '
+                    f'Yaw: {math.degrees(self.yaw):.2f}°'
+                )
+                self.get_logger().info(
+                    f'QUATERNION OUTPUT - X: {quaternion[0]:.4f}, Y: {quaternion[1]:.4f}, '
+                    f'Z: {quaternion[2]:.4f}, W: {quaternion[3]:.4f}'
+                )
+                
+                # Check if euler angles are actually changing
+                roll_changing = abs(math.degrees(self.roll)) > 0.5
+                pitch_changing = abs(math.degrees(self.pitch)) > 0.5
+                yaw_changing = abs(math.degrees(self.yaw)) > 180  # Yaw can be large
+                self.get_logger().info(
+                    f'MOVEMENT CHECK - Roll changing: {roll_changing}, '
+                    f'Pitch changing: {pitch_changing}, Yaw changing: {yaw_changing}'
+                )
             
             # Set orientation covariance (diagonal matrix)
             # Lower values = more confident in the measurement

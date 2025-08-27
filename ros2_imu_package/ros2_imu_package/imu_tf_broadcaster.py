@@ -56,6 +56,19 @@ class IMUTFBroadcaster(Node):
             # Rotation (from IMU orientation)
             transform.transform.rotation = msg.orientation
             
+            # Debug logging every 50 messages (once per second at 50Hz)
+            if hasattr(self, '_msg_count'):
+                self._msg_count += 1
+            else:
+                self._msg_count = 0
+                
+            if self._msg_count % 50 == 0:
+                self.get_logger().info(
+                    f'TF Broadcast - Quaternion: [{msg.orientation.x:.3f}, '
+                    f'{msg.orientation.y:.3f}, {msg.orientation.z:.3f}, '
+                    f'{msg.orientation.w:.3f}]'
+                )
+            
             # Broadcast the transform
             self.tf_broadcaster.sendTransform(transform)
             

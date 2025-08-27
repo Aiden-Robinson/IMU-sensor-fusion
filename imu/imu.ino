@@ -54,6 +54,12 @@ struct {
   float roll, pitch, yaw;
 } orientation;
 
+// Accelerometer bias/offset variables for calibration
+struct {
+  float x, y, z;
+  bool calibrated;
+} accel_bias = {0.0, 0.0, 0.0, false};
+
 unsigned long lastPrintMillis = 0;
 
 // Function declarations
@@ -144,6 +150,14 @@ void loop() {
     Serial.print(normalized.magnetometer.z, 3);
     Serial.println();
 
+    // Debug: Print raw sensor check
+    Serial.print("DEBUG SENSOR CHECK:\t");
+    Serial.print("ACC_VALID:");
+    Serial.print((abs(normalized.accelerometer.x) > 0.1 || abs(normalized.accelerometer.y) > 0.1 || abs(normalized.accelerometer.z) > 0.1) ? "YES" : "NO");
+    Serial.print("\tMAG_VALID:");
+    Serial.print((abs(normalized.magnetometer.x) > 0.1 || abs(normalized.magnetometer.y) > 0.1 || abs(normalized.magnetometer.z) > 0.1) ? "YES" : "NO");
+    Serial.println();
+
     Serial.println();
 
     Serial.print("ORIENTATION:\t");
@@ -202,9 +216,39 @@ void normalize(gyroscope_raw gyroscope) {
 
 void normalize(accelerometer_raw accelerometer) {
   // Sensitivity Scale Factor (MPU datasheet page 9)
-  normalized.accelerometer.x = accelerometer.x * G / 16384;
-  normalized.accelerometer.y = accelerometer.y * G / 16384;
-  normalized.accelerometer.z = accelerometer.z * G / 16384;
+  float raw_x = accelerometer.x * G / 16384;
+  float raw_y = accelerometer.y * G / 16384;
+  float raw_z = accelerometer.z * G / 16384;
+  
+  // Auto-calibrate accelerometer bias on startup
+  if (!accel_bias.calibrated) {
+    static float sum_x = 0, sum_y = 0, sum_z = 0;
+    static int sample_count = 0;
+    
+    sum_x += raw_x;
+    sum_y += raw_y;
+    sum_z += raw_z;
+    sample_count++;
+    
+    // Calibrate after 100 samples (about 2 seconds)
+    if (sample_count >= 100) {
+      accel_bias.x = sum_x / sample_count;
+      accel_bias.y = sum_y / sample_count;
+      accel_bias.z = (sum_z / sample_count) - G; // Remove gravity from Z
+      accel_bias.calibrated = true;
+      
+      Serial.println("=== ACCELEROMETER CALIBRATED ===");
+      Serial.print("Bias - X: "); Serial.print(accel_bias.x, 3);
+      Serial.print(" Y: "); Serial.print(accel_bias.y, 3);
+      Serial.print(" Z: "); Serial.print(accel_bias.z, 3);
+      Serial.println();
+    }
+  }
+  
+  // Apply bias compensation
+  normalized.accelerometer.x = raw_x - accel_bias.x;
+  normalized.accelerometer.y = raw_y - accel_bias.y;
+  normalized.accelerometer.z = raw_z - accel_bias.z;
 }
 
 void normalize(temperature_raw temperature) {
@@ -270,37 +314,43 @@ void readRawMagnetometer() {
 
 // Orientation calculation function
 void calculateOrientation() {
-  // Calculate roll and pitch from accelerometer data
-  // Roll: rotation around X-axis
-  orientation.roll =
-      atan2(normalized.accelerometer.y,
-            sqrt(normalized.accelerometer.x * normalized.accelerometer.x +
-                 normalized.accelerometer.z * normalized.accelerometer.z)) *
-      180.0 / PI;
+  // Skip calculation during calibration
+  if (!accel_bias.calibrated) {
+    orientation.roll = 0;
+    orientation.pitch = 0;
+    orientation.yaw = 0;
+    return;
+  }
+  
+  // Calculate roll and pitch from accelerometer data (now bias-compensated)
+  // Roll: rotation around X-axis (tilting left/right)
+  orientation.roll = atan2(normalized.accelerometer.y, 
+                          sqrt(normalized.accelerometer.x * normalized.accelerometer.x + 
+                               normalized.accelerometer.z * normalized.accelerometer.z)) * 180.0 / PI;
 
-  // Pitch: rotation around Y-axis
-  orientation.pitch =
-      atan2(-normalized.accelerometer.x,
-            sqrt(normalized.accelerometer.y * normalized.accelerometer.y +
-                 normalized.accelerometer.z * normalized.accelerometer.z)) *
-      180.0 / PI;
+  // Pitch: rotation around Y-axis (tilting forward/backward)  
+  orientation.pitch = atan2(-normalized.accelerometer.x,
+                           sqrt(normalized.accelerometer.y * normalized.accelerometer.y + 
+                                normalized.accelerometer.z * normalized.accelerometer.z)) * 180.0 / PI;
 
-  // Yaw calculation from magnetometer (simple approach)
-  // Note: This is a basic calculation and will be improved with Kalman
-  // filtering later
-  float mag_x =
-      normalized.magnetometer.x * cos(orientation.pitch * PI / 180.0) +
-      normalized.magnetometer.z * sin(orientation.pitch * PI / 180.0);
-  float mag_y = normalized.magnetometer.x * sin(orientation.roll * PI / 180.0) *
-                    sin(orientation.pitch * PI / 180.0) +
-                normalized.magnetometer.y * cos(orientation.roll * PI / 180.0) -
-                normalized.magnetometer.z * sin(orientation.roll * PI / 180.0) *
-                    cos(orientation.pitch * PI / 180.0);
+  // Only calculate yaw if we have valid magnetometer data
+  float mag_magnitude = sqrt(normalized.magnetometer.x * normalized.magnetometer.x + 
+                            normalized.magnetometer.y * normalized.magnetometer.y + 
+                            normalized.magnetometer.z * normalized.magnetometer.z);
+  
+  if (mag_magnitude > 10.0) {  // Valid magnetometer data
+    // Simple yaw calculation from magnetometer (basic approach)
+    float mag_x = normalized.magnetometer.x * cos(orientation.pitch * PI / 180.0) + 
+                  normalized.magnetometer.z * sin(orientation.pitch * PI / 180.0);
+    float mag_y = normalized.magnetometer.x * sin(orientation.roll * PI / 180.0) * sin(orientation.pitch * PI / 180.0) + 
+                  normalized.magnetometer.y * cos(orientation.roll * PI / 180.0) - 
+                  normalized.magnetometer.z * sin(orientation.roll * PI / 180.0) * cos(orientation.pitch * PI / 180.0);
 
-  orientation.yaw = atan2(-mag_y, mag_x) * 180.0 / PI;
+    orientation.yaw = atan2(-mag_y, mag_x) * 180.0 / PI;
 
-  // Normalize yaw to 0-360 degrees
-  if (orientation.yaw < 0) {
-    orientation.yaw += 360.0;
+    // Normalize yaw to 0-360 degrees
+    if (orientation.yaw < 0) {
+      orientation.yaw += 360.0;
+    }
   }
 }
