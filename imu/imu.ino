@@ -1,432 +1,278 @@
-// unfiltered code
-#include "I2C.h"
-#include "Wire.h"
+#include <Wire.h>
+#include <math.h>
 
-#define MPU9250_IMU_ADDRESS 0x68
-#define MPU9250_MAG_ADDRESS 0x0C
+// MPU9250 I2C address and registers
+#define MPU9250_ADDRESS 0x68
+#define ACCEL_XOUT_H 0x3B
+#define GYRO_XOUT_H 0x43
+#define PWR_MGMT_1 0x6B
 
-#define GYRO_FULL_SCALE_250_DPS 0x00
-#define GYRO_FULL_SCALE_500_DPS 0x08
-#define GYRO_FULL_SCALE_1000_DPS 0x10
-#define GYRO_FULL_SCALE_2000_DPS 0x18
+// Scale factors
+#define ACCEL_SCALE 16384.0  // ±2g
+#define GYRO_SCALE 131.0     // ±250°/s, convert to deg/s
 
-#define ACC_FULL_SCALE_2G 0x00
-#define ACC_FULL_SCALE_4G 0x08
-#define ACC_FULL_SCALE_8G 0x10
-#define ACC_FULL_SCALE_16G 0x18
+// Kalman filter matrices (4x4 state: roll, pitch, roll_bias, pitch_bias)
+float x[4] = {0, 0, 0, 0};     // State vector [roll, pitch, roll_bias, pitch_bias]
+float P[4][4];                  // Error covariance matrix
+float Q[4][4];                  // Process noise covariance
+float R[2][2];                  // Measurement noise covariance
+float K[4][2];                  // Kalman gain
+float F[4][4];                  // State transition matrix
+float H[2][4];                  // Measurement matrix
 
-#define TEMPERATURE_OFFSET 21  // As defined in documentation
 
-#define INTERVAL_MS_PRINT 1000
-
-#define G 9.80665
-
-struct gyroscope_raw {
-  int16_t x, y, z;
-} gyroscope;
-
-struct accelerometer_raw {
-  int16_t x, y, z;
-} accelerometer;
-
-struct magnetometer_raw {
-  int16_t x, y, z;
-
-  struct {
-    int8_t x, y, z;
-  } adjustment;
-} magnetometer;
-
-struct temperature_raw {
-  int16_t value;
-} temperature;
-
-struct {
-  struct {
-    float x, y, z;
-  } accelerometer, gyroscope, magnetometer;
-
-  float temperature;
-} normalized;
-
-// Orientation variables
-struct {
-  float roll, pitch, yaw;
-  float prev_yaw;  // For yaw filtering
-  bool yaw_initialized;
-} orientation = {0.0, 0.0, 0.0, 0.0, false};
-
-// Accelerometer bias/offset variables for calibration
-struct {
-  float x, y, z;
-  bool calibrated;
-} accel_bias = {0.0, 0.0, 0.0, false};
-
-unsigned long lastPrintMillis = 0;
-
-// Function declarations
-bool isImuReady();
-void readRawImu();
-void normalize(gyroscope_raw gyroscope);
-void normalize(accelerometer_raw accelerometer);
-void normalize(temperature_raw temperature);
-void normalize(magnetometer_raw magnetometer);
-bool isMagnetometerReady();
-void readRawMagnetometer();
-void setMagnetometerAdjustmentValues();
-void calculateOrientation();
+float dt = 0.02;  // 50Hz update rate
+unsigned long lastTime = 0;
 
 void setup() {
-  Wire.begin();
   Serial.begin(115200);
-
-  I2CwriteByte(MPU9250_IMU_ADDRESS, 27,
-               GYRO_FULL_SCALE_1000_DPS);  // Configure gyroscope range
-  I2CwriteByte(MPU9250_IMU_ADDRESS, 28,
-               ACC_FULL_SCALE_2G);  // Configure accelerometer range
-
-  I2CwriteByte(MPU9250_IMU_ADDRESS, 55,
-               0x02);  // Set by pass mode for the magnetometers
-  I2CwriteByte(MPU9250_IMU_ADDRESS, 56,
-               0x01);  // Enable interrupt pin for raw data
-
-  setMagnetometerAdjustmentValues();
-
-  // Start magnetometer
-  I2CwriteByte(MPU9250_MAG_ADDRESS, 0x0A,
-               0x12);  // Request continuous magnetometer measurements in 16
-                       // bits (mode 1)
+  Wire.begin();
+  
+  // Initialize MPU9250
+  initMPU9250();
+  
+  // Initialize Kalman filter matrices
+  initKalmanFilter();
+  
+  Serial.println("Kalman Filter AHRS Ready");
+  Serial.println("Format: Roll,Pitch,AccelX,AccelY,AccelZ,GyroZ");
+  
+  lastTime = millis();
+  delay(1000);
 }
 
 void loop() {
-  unsigned long currentMillis = millis();
-
-  if (isImuReady()) {
-    readRawImu();
-
-    normalize(gyroscope);
-    normalize(accelerometer);
-    normalize(temperature);
-
-    calculateOrientation();
-  }
-
-  if (isMagnetometerReady()) {
-    readRawMagnetometer();
-
-    normalize(magnetometer);
-  }
-
-  if (currentMillis - lastPrintMillis > INTERVAL_MS_PRINT) {
-    Serial.print("TEMP:\t");
-    Serial.print(normalized.temperature, 2);
-    Serial.print("\xC2\xB0");  // Print degree symbol
-    Serial.print("C");
-    Serial.println();
-
-    Serial.print("GYR (");
-    Serial.print("\xC2\xB0");  // Print degree symbol
-    Serial.print("/s):\t");
-    Serial.print(normalized.gyroscope.x, 3);
-    Serial.print("\t\t");
-    Serial.print(normalized.gyroscope.y, 3);
-    Serial.print("\t\t");
-    Serial.print(normalized.gyroscope.z, 3);
-    Serial.println();
-
-    Serial.print("ACC (m/s^2):\t");
-    Serial.print(normalized.accelerometer.x, 3);
-    Serial.print("\t\t");
-    Serial.print(normalized.accelerometer.y, 3);
-    Serial.print("\t\t");
-    Serial.print(normalized.accelerometer.z, 3);
-    Serial.println();
-
-    Serial.print("MAG (");
-    Serial.print("\xce\xbc");  // Print micro symbol
-    Serial.print("T):\t");
-    Serial.print(normalized.magnetometer.x, 3);
-    Serial.print("\t\t");
-    Serial.print(normalized.magnetometer.y, 3);
-    Serial.print("\t\t");
-    Serial.print(normalized.magnetometer.z, 3);
-    Serial.println();
-
-    // Debug: Print raw sensor check
-    Serial.print("DEBUG SENSOR CHECK:\t");
-    Serial.print("ACC_VALID:");
-    Serial.print((abs(normalized.accelerometer.x) > 0.1 || abs(normalized.accelerometer.y) > 0.1 || abs(normalized.accelerometer.z) > 0.1) ? "YES" : "NO");
-    Serial.print("\tMAG_VALID:");
-    Serial.print((abs(normalized.magnetometer.x) > 0.1 || abs(normalized.magnetometer.y) > 0.1 || abs(normalized.magnetometer.z) > 0.1) ? "YES" : "NO");
-    Serial.println();
-
-    Serial.println();
-
-    Serial.print("ORIENTATION:\t");
-    Serial.print(orientation.roll, 2);
-    Serial.print("\t\t");
-    Serial.print(orientation.pitch, 2);
-    Serial.print("\t\t");
-    Serial.print(orientation.yaw, 2);
-    Serial.println();
-
-    Serial.println();
-
-    lastPrintMillis = currentMillis;
-  }
-}
-
-// IMU Functions
-bool isImuReady() {
-  uint8_t isReady;  // Interruption flag
-
-  I2Cread(MPU9250_IMU_ADDRESS, 58, 1, &isReady);
-
-  return isReady & 0x01;  // Read register and wait for the RAW_DATA_RDY_INT
-}
-
-void readRawImu() {
-  uint8_t buff[14];
-
-  // Read output registers:
-  // [59-64] Accelerometer
-  // [65-66] Temperature
-  // [67-72] Gyroscope
-  I2Cread(MPU9250_IMU_ADDRESS, 59, 14, buff);
-
-  // Accelerometer, create 16 bits values from 8 bits data
-  accelerometer.x = (buff[0] << 8 | buff[1]);
-  accelerometer.y = (buff[2] << 8 | buff[3]);
-  accelerometer.z = (buff[4] << 8 | buff[5]);
-
-  // Temperature, create 16 bits values from 8 bits data
-  temperature.value = (buff[6] << 8 | buff[7]);
-
-  // Gyroscope, create 16 bits values from 8 bits data
-  gyroscope.x = (buff[8] << 8 | buff[9]);
-  gyroscope.y = (buff[10] << 8 | buff[11]);
-  gyroscope.z = (buff[12] << 8 | buff[13]);
-}
-
-// Normalization Functions
-void normalize(gyroscope_raw gyroscope) {
-  // Sensitivity Scale Factor (MPU datasheet page 8)
-  normalized.gyroscope.x = gyroscope.x / 32.8;
-  normalized.gyroscope.y = gyroscope.y / 32.8;
-  normalized.gyroscope.z = gyroscope.z / 32.8;
-}
-
-void normalize(accelerometer_raw accelerometer) {
-  // Sensitivity Scale Factor (MPU datasheet page 9)
-  float raw_x = accelerometer.x * G / 16384;
-  float raw_y = accelerometer.y * G / 16384;
-  float raw_z = accelerometer.z * G / 16384;
+  unsigned long currentTime = millis();
+  dt = (currentTime - lastTime) / 1000.0;  // Convert to seconds
+  lastTime = currentTime;
   
-  // Auto-calibrate accelerometer bias on startup
-  if (!accel_bias.calibrated) {
-    static float sum_x = 0, sum_y = 0, sum_z = 0;
-    static int sample_count = 0;
-    
-    // Only calibrate if the sensor is relatively still
-    float total_accel = sqrt(raw_x * raw_x + raw_y * raw_y + raw_z * raw_z);
-    if (abs(total_accel - G) < 0.5) { // Check if acceleration is close to 1G
-      sum_x += raw_x;
-      sum_y += raw_y;
-      sum_z += raw_z;
-      sample_count++;
-      
-      // Calibrate after 200 samples (about 4 seconds) of stable readings
-      if (sample_count >= 200) {
-        accel_bias.x = sum_x / sample_count;
-        accel_bias.y = sum_y / sample_count;
-        accel_bias.z = (sum_z / sample_count) - G; // Remove gravity from Z
-        accel_bias.calibrated = true;
-        
-        Serial.println("=== ACCELEROMETER CALIBRATED ===");
-        Serial.print("Bias - X: "); Serial.print(accel_bias.x, 3);
-        Serial.print(" Y: "); Serial.print(accel_bias.y, 3);
-        Serial.print(" Z: "); Serial.print(accel_bias.z, 3);
-        Serial.println();
-      }
-    } else {
-      // Reset calibration if sensor is moved during calibration
-      sum_x = 0;
-      sum_y = 0;
-      sum_z = 0;
-      sample_count = 0;
+  // Read sensor data
+  int16_t accel[3], gyro[3];
+  readAccelGyro(accel, gyro);
+  
+  // Convert to physical units
+  float ax = accel[0] / ACCEL_SCALE;  // g
+  float ay = accel[1] / ACCEL_SCALE;  // g  
+  float az = accel[2] / ACCEL_SCALE;  // g
+  
+  float gx = gyro[0] / GYRO_SCALE;    // deg/s
+  float gy = gyro[1] / GYRO_SCALE;    // deg/s
+  float gz = gyro[2] / GYRO_SCALE;    // deg/s
+  
+  // Calculate accelerometer roll and pitch
+  float roll_accel = atan2(ay, sqrt(ax*ax + az*az)) * 180.0/PI;
+  float pitch_accel = atan2(-ax, sqrt(ay*ay + az*az)) * 180.0/PI;
+  
+  // Kalman filter predict step
+  kalmanPredict(gx, gy);
+  
+  // Kalman filter update step
+  kalmanUpdate(roll_accel, pitch_accel);
+  
+  // Output results
+  Serial.print(x[0], 2);  Serial.print(",");  // Filtered roll
+  Serial.print(x[1], 2);  Serial.print(",");  // Filtered pitch
+  Serial.print(ax, 3);    Serial.print(",");  // Raw accel X
+  Serial.print(ay, 3);    Serial.print(",");  // Raw accel Y
+  Serial.print(az, 3);    Serial.print(",");  // Raw accel Z
+  Serial.println(gz, 3);                      // Raw gyro Z for yaw rate
+  
+  delay(20);  // 50Hz
+}
+
+void initMPU9250() {
+  // Wake up MPU9250
+  writeRegister(MPU9250_ADDRESS, PWR_MGMT_1, 0x00);
+  delay(100);
+}
+
+void initKalmanFilter() {
+  // Initialize state vector to zero
+  for(int i = 0; i < 4; i++) {
+    x[i] = 0.0;
+  }
+  
+  // Initialize error covariance matrix P (diagonal)
+  for(int i = 0; i < 4; i++) {
+    for(int j = 0; j < 4; j++) {
+      P[i][j] = (i == j) ? 1.0 : 0.0;  // Identity matrix
     }
   }
   
-  // Apply bias compensation and low-pass filter
-  static float filtered_x = 0, filtered_y = 0, filtered_z = 0;
-  float alpha = 0.1; // Lower = smoother, higher = more responsive
-  
-  filtered_x = (alpha * (raw_x - accel_bias.x)) + ((1.0 - alpha) * filtered_x);
-  filtered_y = (alpha * (raw_y - accel_bias.y)) + ((1.0 - alpha) * filtered_y);
-  filtered_z = (alpha * (raw_z - accel_bias.z)) + ((1.0 - alpha) * filtered_z);
-  
-  normalized.accelerometer.x = filtered_x;
-  normalized.accelerometer.y = filtered_y;
-  normalized.accelerometer.z = filtered_z;
-}
-
-void normalize(temperature_raw temperature) {
-  // Sensitivity Scale Factor (MPU datasheet page 11) & formula (MPU registers
-  // page 33)
-  normalized.temperature =
-      ((temperature.value - TEMPERATURE_OFFSET) / 333.87) + TEMPERATURE_OFFSET;
-}
-
-void normalize(magnetometer_raw magnetometer) {
-  // Sensitivity Scale Factor (MPU datasheet page 10)
-  // 0.6 µT/LSB (14-bit)
-  // 0.15µT/LSB (16-bit)
-  // Adjustment values (MPU register page 53)
-  normalized.magnetometer.x =
-      magnetometer.x * 0.15 * (((magnetometer.adjustment.x - 128) / 256) + 1);
-  normalized.magnetometer.y =
-      magnetometer.y * 0.15 * (((magnetometer.adjustment.y - 128) / 256) + 1);
-  normalized.magnetometer.z =
-      magnetometer.z * 0.15 * (((magnetometer.adjustment.z - 128) / 256) + 1);
-}
-
-// Magnetometer Functions
-void setMagnetometerAdjustmentValues() {
-  uint8_t buff[3];
-
-  I2CwriteByte(MPU9250_MAG_ADDRESS, 0x0A,
-               0x1F);  // Set 16-bits output & fuse ROM access mode
-
-  delay(1000);
-
-  I2Cread(MPU9250_MAG_ADDRESS, 0x10, 3, buff);  // Read adjustments
-
-  magnetometer.adjustment.x = buff[0];  // Adjustment for X axis
-  magnetometer.adjustment.y = buff[1];  // Adjustment for Y axis
-  magnetometer.adjustment.z = buff[2];  // Adjustment for Z axis
-
-  I2CwriteByte(MPU9250_MAG_ADDRESS, 0x0A, 0x10);  // Power down
-}
-
-bool isMagnetometerReady() {
-  uint8_t isReady;  // Interruption flag
-
-  I2Cread(MPU9250_MAG_ADDRESS, 0x02, 1, &isReady);
-
-  return isReady & 0x01;  // Read register and wait for the DRDY
-}
-
-void readRawMagnetometer() {
-  uint8_t buff[7];
-
-  // Read output registers:
-  // [0x03-0x04] X-axis measurement
-  // [0x05-0x06] Y-axis measurement
-  // [0x07-0x08] Z-axis measurement
-  I2Cread(MPU9250_MAG_ADDRESS, 0x03, 7, buff);
-
-  // Magnetometer, create 16 bits values from 8 bits data
-  magnetometer.x = (buff[1] << 8 | buff[0]);
-  magnetometer.y = (buff[3] << 8 | buff[2]);
-  magnetometer.z = (buff[5] << 8 | buff[4]);
-}
-
-// Orientation calculation function
-void calculateOrientation() {
-  // Skip calculation during calibration
-  if (!accel_bias.calibrated) {
-    orientation.roll = 0;
-    orientation.pitch = 0;
-    orientation.yaw = 0;
-    return;
-  }
-  
-  // Variables for complementary filter
-  static float filtered_roll = 0, filtered_pitch = 0;
-  float alpha = 0.96; // Complementary filter coefficient (0.96 = 96% gyro, 4% accelerometer)
-  
-  // Calculate angles from accelerometer (for absolute reference)
-  float accel_roll = atan2(normalized.accelerometer.y, 
-                          sqrt(normalized.accelerometer.x * normalized.accelerometer.x + 
-                               normalized.accelerometer.z * normalized.accelerometer.z)) * 180.0 / PI;
-  float accel_pitch = atan2(-normalized.accelerometer.x,
-                           sqrt(normalized.accelerometer.y * normalized.accelerometer.y + 
-                                normalized.accelerometer.z * normalized.accelerometer.z)) * 180.0 / PI;
-  
-  // Calculate angle change from gyroscope data
-  static unsigned long last_time = 0;
-  unsigned long current_time = millis();
-  float dt = (current_time - last_time) / 1000.0;
-  last_time = current_time;
-  
-  if (dt > 0.0) {  // Avoid division by zero
-    // Integrate gyroscope data
-    float gyro_roll = filtered_roll + normalized.gyroscope.x * dt;
-    float gyro_pitch = filtered_pitch + normalized.gyroscope.y * dt;
-    
-    // Complementary filter - combine accelerometer and gyroscope data
-    filtered_roll = alpha * gyro_roll + (1.0 - alpha) * accel_roll;
-    filtered_pitch = alpha * gyro_pitch + (1.0 - alpha) * accel_pitch;
-    
-    // Update orientation
-    orientation.roll = filtered_roll;
-    orientation.pitch = filtered_pitch;
-  }
-  
-  // Only calculate yaw if we have valid magnetometer data
-  float mag_magnitude = sqrt(normalized.magnetometer.x * normalized.magnetometer.x + 
-                            normalized.magnetometer.y * normalized.magnetometer.y + 
-                            normalized.magnetometer.z * normalized.magnetometer.z);
-  
-  if (mag_magnitude > 10.0) {  // Valid magnetometer data
-    // Tilt-compensated magnetometer calculations
-    float cos_roll = cos(orientation.roll * PI / 180.0);
-    float sin_roll = sin(orientation.roll * PI / 180.0);
-    float cos_pitch = cos(orientation.pitch * PI / 180.0);
-    float sin_pitch = sin(orientation.pitch * PI / 180.0);
-    
-    // Tilt-compensated magnetic field X and Y components
-    float mag_x = normalized.magnetometer.x * cos_pitch +
-                  normalized.magnetometer.y * sin_roll * sin_pitch +
-                  normalized.magnetometer.z * cos_roll * sin_pitch;
-                  
-    float mag_y = normalized.magnetometer.y * cos_roll -
-                  normalized.magnetometer.z * sin_roll;
-    
-    // Calculate raw yaw
-    float raw_yaw = atan2(-mag_y, mag_x) * 180.0 / PI;
-    
-    // Normalize raw yaw to 0-360 degrees
-    if (raw_yaw < 0) {
-      raw_yaw += 360.0;
-    }
-    
-    // Initialize or update filtered yaw
-    if (!orientation.yaw_initialized) {
-      orientation.yaw = raw_yaw;
-      orientation.prev_yaw = raw_yaw;
-      orientation.yaw_initialized = true;
-    } else {
-      // Handle 360/0 degree wrap-around
-      float yaw_diff = raw_yaw - orientation.prev_yaw;
-      if (yaw_diff > 180.0) {
-        yaw_diff -= 360.0;
-      } else if (yaw_diff < -180.0) {
-        yaw_diff += 360.0;
-      }
-      
-      // Strong low-pass filter for yaw to reduce magnetic interference
-      float yaw_alpha = 0.1;  // Very smooth filtering for yaw
-      orientation.yaw = orientation.prev_yaw + (yaw_alpha * yaw_diff);
-      
-      // Normalize filtered yaw to 0-360 degrees
-      if (orientation.yaw < 0) {
-        orientation.yaw += 360.0;
-      } else if (orientation.yaw >= 360.0) {
-        orientation.yaw -= 360.0;
-      }
-      
-      orientation.prev_yaw = orientation.yaw;
+  // Process noise covariance Q
+  for(int i = 0; i < 4; i++) {
+    for(int j = 0; j < 4; j++) {
+      Q[i][j] = 0.0;
     }
   }
+  Q[0][0] = 0.001;  // Roll angle process noise
+  Q[1][1] = 0.001;  // Pitch angle process noise  
+  Q[2][2] = 0.003;  // Roll bias process noise
+  Q[3][3] = 0.003;  // Pitch bias process noise
+  
+  // Measurement noise covariance R
+  R[0][0] = 0.3;    // Roll measurement noise (accelerometer)
+  R[0][1] = 0.0;
+  R[1][0] = 0.0;
+  R[1][1] = 0.3;    // Pitch measurement noise (accelerometer)
+  
+  // Measurement matrix H (we measure roll and pitch directly)
+  for(int i = 0; i < 2; i++) {
+    for(int j = 0; j < 4; j++) {
+      H[i][j] = 0.0;
+    }
+  }
+  H[0][0] = 1.0;  // Measure roll (state 0)
+  H[1][1] = 1.0;  // Measure pitch (state 1)
+}
+
+void kalmanPredict(float gyro_x, float gyro_y) {
+  // State transition matrix F
+  F[0][0] = 1.0;  F[0][1] = 0.0;  F[0][2] = -dt;  F[0][3] = 0.0;
+  F[1][0] = 0.0;  F[1][1] = 1.0;  F[1][2] = 0.0;   F[1][3] = -dt;
+  F[2][0] = 0.0;  F[2][1] = 0.0;  F[2][2] = 1.0;   F[2][3] = 0.0;
+  F[3][0] = 0.0;  F[3][1] = 0.0;  F[3][2] = 0.0;   F[3][3] = 1.0;
+  
+  // Control input (gyroscope measurements)
+  float u[2] = {gyro_x * dt, gyro_y * dt};
+  
+  // Predict state: x = F*x + B*u
+  float x_new[4];
+  x_new[0] = x[0] + (gyro_x - x[2]) * dt;  // roll = roll + (gyro_x - bias) * dt
+  x_new[1] = x[1] + (gyro_y - x[3]) * dt;  // pitch = pitch + (gyro_y - bias) * dt  
+  x_new[2] = x[2];                         // roll_bias stays same
+  x_new[3] = x[3];                         // pitch_bias stays same
+  
+  // Update state
+  for(int i = 0; i < 4; i++) {
+    x[i] = x_new[i];
+  }
+  
+  // Predict covariance: P = F*P*F' + Q
+  float P_temp[4][4];
+  matrixMultiply4x4(F, P, P_temp);
+  matrixMultiplyTranspose4x4(P_temp, F, P);
+  matrixAdd4x4(P, Q, P);
+}
+
+void kalmanUpdate(float roll_meas, float pitch_meas) {
+  // Innovation (measurement residual)
+  float y[2];
+  y[0] = roll_meas - x[0];   // Roll innovation
+  y[1] = pitch_meas - x[1];  // Pitch innovation
+  
+  // Innovation covariance: S = H*P*H' + R
+  float S[2][2];
+  S[0][0] = P[0][0] + R[0][0];  // Roll variance
+  S[0][1] = P[0][1];
+  S[1][0] = P[1][0];  
+  S[1][1] = P[1][1] + R[1][1];  // Pitch variance
+  
+  // Kalman gain: K = P*H'*S^-1
+  float S_inv[2][2];
+  matrixInverse2x2(S, S_inv);
+  
+  // K = P*H'*S_inv (simplified since H is simple)
+  K[0][0] = P[0][0] * S_inv[0][0] + P[0][1] * S_inv[1][0];
+  K[0][1] = P[0][0] * S_inv[0][1] + P[0][1] * S_inv[1][1];
+  K[1][0] = P[1][0] * S_inv[0][0] + P[1][1] * S_inv[1][0];
+  K[1][1] = P[1][0] * S_inv[0][1] + P[1][1] * S_inv[1][1];
+  K[2][0] = P[2][0] * S_inv[0][0] + P[2][1] * S_inv[1][0];
+  K[2][1] = P[2][0] * S_inv[0][1] + P[2][1] * S_inv[1][1];
+  K[3][0] = P[3][0] * S_inv[0][0] + P[3][1] * S_inv[1][0];
+  K[3][1] = P[3][0] * S_inv[0][1] + P[3][1] * S_inv[1][1];
+  
+  // Update state: x = x + K*y
+  x[0] = x[0] + K[0][0] * y[0] + K[0][1] * y[1];
+  x[1] = x[1] + K[1][0] * y[0] + K[1][1] * y[1];
+  x[2] = x[2] + K[2][0] * y[0] + K[2][1] * y[1];
+  x[3] = x[3] + K[3][0] * y[0] + K[3][1] * y[1];
+  
+  // Update covariance: P = (I - K*H)*P
+  float I_KH[4][4];
+  // I - K*H (simplified since H is simple)
+  I_KH[0][0] = 1.0 - K[0][0];  I_KH[0][1] = -K[0][1];      I_KH[0][2] = 0.0;  I_KH[0][3] = 0.0;
+  I_KH[1][0] = -K[1][0];       I_KH[1][1] = 1.0 - K[1][1]; I_KH[1][2] = 0.0;  I_KH[1][3] = 0.0;
+  I_KH[2][0] = -K[2][0];       I_KH[2][1] = -K[2][1];      I_KH[2][2] = 1.0;  I_KH[2][3] = 0.0;
+  I_KH[3][0] = -K[3][0];       I_KH[3][1] = -K[3][1];      I_KH[3][2] = 0.0;  I_KH[3][3] = 1.0;
+  
+  float P_new[4][4];
+  matrixMultiply4x4(I_KH, P, P_new);
+  
+  // Copy back to P
+  for(int i = 0; i < 4; i++) {
+    for(int j = 0; j < 4; j++) {
+      P[i][j] = P_new[i][j];
+    }
+  }
+}
+
+// Matrix operations
+void matrixMultiply4x4(float A[4][4], float B[4][4], float C[4][4]) {
+  for(int i = 0; i < 4; i++) {
+    for(int j = 0; j < 4; j++) {
+      C[i][j] = 0.0;
+      for(int k = 0; k < 4; k++) {
+        C[i][j] += A[i][k] * B[k][j];
+      }
+    }
+  }
+}
+
+void matrixMultiplyTranspose4x4(float A[4][4], float B[4][4], float C[4][4]) {
+  for(int i = 0; i < 4; i++) {
+    for(int j = 0; j < 4; j++) {
+      C[i][j] = 0.0;
+      for(int k = 0; k < 4; k++) {
+        C[i][j] += A[i][k] * B[j][k];  // B transposed
+      }
+    }
+  }
+}
+
+void matrixAdd4x4(float A[4][4], float B[4][4], float C[4][4]) {
+  for(int i = 0; i < 4; i++) {
+    for(int j = 0; j < 4; j++) {
+      C[i][j] = A[i][j] + B[i][j];
+    }
+  }
+}
+
+void matrixInverse2x2(float A[2][2], float A_inv[2][2]) {
+  float det = A[0][0] * A[1][1] - A[0][1] * A[1][0];
+  if(abs(det) < 1e-6) det = 1e-6;  // Avoid division by zero
+  
+  A_inv[0][0] = A[1][1] / det;
+  A_inv[0][1] = -A[0][1] / det;
+  A_inv[1][0] = -A[1][0] / det;
+  A_inv[1][1] = A[0][0] / det;
+}
+
+// Hardware functions
+void readAccelGyro(int16_t* accel, int16_t* gyro) {
+  uint8_t buffer[14];
+  
+  Wire.beginTransmission(MPU9250_ADDRESS);
+  Wire.write(ACCEL_XOUT_H);
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU9250_ADDRESS, 14);
+  
+  for(int i = 0; i < 14; i++) {
+    buffer[i] = Wire.read();
+  }
+  
+  accel[0] = (buffer[0] << 8) | buffer[1];
+  accel[1] = (buffer[2] << 8) | buffer[3];
+  accel[2] = (buffer[4] << 8) | buffer[5];
+  
+  gyro[0] = (buffer[8] << 8) | buffer[9];
+  gyro[1] = (buffer[10] << 8) | buffer[11];
+  gyro[2] = (buffer[12] << 8) | buffer[13];
+}
+
+void writeRegister(uint8_t address, uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(address);
+  Wire.write(reg);
+  Wire.write(value);
+  Wire.endTransmission();
 }

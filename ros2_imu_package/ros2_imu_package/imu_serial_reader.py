@@ -94,52 +94,45 @@ class IMUSerialReader(Node):
     def parse_imu_data(self, line):
         """Parse IMU data from Arduino output"""
         try:
-            # Parse temperature data
-            if line.startswith("TEMP:"):
-                temp_str = line.split('\t')[0].replace("TEMP:", "").replace("°C", "").strip()
-                self.temperature = float(temp_str)
+            # Skip header lines
+            if line.startswith("Kalman") or line.startswith("Format"):
+                return
                 
-            # Parse gyroscope data
-            elif line.startswith("GYR"):
-                parts = line.split('\t')
-                if len(parts) >= 4:
-                    self.gyro_x = math.radians(float(parts[1]))  # Convert to rad/s
-                    self.gyro_y = math.radians(float(parts[2]))
-                    self.gyro_z = math.radians(float(parts[3]))
+            # Parse comma-separated values: roll,pitch,ax,ay,az,gz
+            parts = line.strip().split(',')
+            if len(parts) == 6:
+                try:
+                    # Parse orientation (already in degrees)
+                    self.roll = math.radians(float(parts[0]))   # Convert to radians
+                    self.pitch = math.radians(float(parts[1]))  # Convert to radians
+                    self.yaw = 0.0  # No magnetometer, so no yaw
                     
-            # Parse accelerometer data
-            elif line.startswith("ACC"):
-                parts = line.split('\t')
-                if len(parts) >= 4:
-                    self.accel_x = float(parts[1])
-                    self.accel_y = float(parts[2])
-                    self.accel_z = float(parts[3])
+                    # Parse accelerometer data (already in g, convert to m/s^2)
+                    self.accel_x = float(parts[2]) * 9.81
+                    self.accel_y = float(parts[3]) * 9.81
+                    self.accel_z = float(parts[4]) * 9.81
                     
-            # Parse orientation data
-            elif line.startswith("ORIENTATION:"):
-                # Debug: Print the raw line to see what we're trying to parse
-                self.get_logger().info(f'PARSING RAW LINE: "{line}"')
-                
-                # Split by any whitespace and filter out empty strings
-                parts = [part for part in line.split() if part]
-                self.get_logger().info(f'FILTERED PARTS: {parts} (length: {len(parts)})')
-                
-                if len(parts) >= 4:
-                    try:
-                        roll_deg = float(parts[1])
-                        pitch_deg = float(parts[2]) 
-                        yaw_deg = float(parts[3])
-                        self.get_logger().info(f'PARSED VALUES: Roll={roll_deg}°, Pitch={pitch_deg}°, Yaw={yaw_deg}°')
+                    # Parse gyroscope data (convert deg/s to rad/s)
+                    self.gyro_x = 0.0  # Not provided, assuming no roll rate
+                    self.gyro_y = 0.0  # Not provided, assuming no pitch rate
+                    self.gyro_z = math.radians(float(parts[5]))  # Convert to rad/s
+                    
+                    if hasattr(self, '_parse_count'):
+                        self._parse_count += 1
+                    else:
+                        self._parse_count = 0
                         
-                        self.roll = math.radians(roll_deg)   # Convert to radians
-                        self.pitch = math.radians(pitch_deg)
-                        self.yaw = math.radians(yaw_deg)
-                        self.get_logger().info(f'CONVERTED TO RADIANS: Roll={self.roll:.4f}, Pitch={self.pitch:.4f}, Yaw={self.yaw:.4f}')
-                    except ValueError as e:
-                        self.get_logger().error(f'Failed to parse orientation values: {e}')
-                else:
-                    self.get_logger().warn(f'Insufficient orientation parts: expected 4, got {len(parts)}')
-                    
+                    if self._parse_count % 50 == 0:  # Log every second at 50Hz
+                        self.get_logger().debug(
+                            f'IMU Data - Roll: {math.degrees(self.roll):.2f}°, '
+                            f'Pitch: {math.degrees(self.pitch):.2f}°, '
+                            f'Accel: ({self.accel_x:.2f}, {self.accel_y:.2f}, {self.accel_z:.2f}) m/s²'
+                        )
+                        
+                except ValueError as e:
+                    self.get_logger().error(f'Failed to parse values: {e}')
+            else:
+                self.get_logger().warn(f'Invalid data format: expected 6 values, got {len(parts)}')
         except (ValueError, IndexError) as e:
             # Silently ignore parsing errors to avoid spam
             pass
