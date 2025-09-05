@@ -15,6 +15,10 @@ from ament_index_python.packages import get_package_share_directory
 
 
 def generate_launch_description():
+    from launch.actions import TimerAction
+    from launch.event_handlers import OnProcessStart
+    from launch.events import matches_action
+    
     # Declare launch arguments
     serial_port_arg = DeclareLaunchArgument(
         'serial_port',
@@ -37,7 +41,7 @@ def generate_launch_description():
     # Get package directory
     pkg_dir = get_package_share_directory('ros2_imu_package')
     
-    # IMU Serial Reader Node
+    # IMU Serial Reader Node with respawn
     imu_reader_node = Node(
         package='ros2_imu_package',
         executable='imu_serial_reader',
@@ -48,19 +52,9 @@ def generate_launch_description():
             'frame_id': 'imu_link',
             'publish_rate': 50.0
         }],
-        output='screen'
-    )
-    
-    # IMU TF Broadcaster Node
-    imu_tf_broadcaster_node = Node(
-        package='ros2_imu_package',
-        executable='imu_tf_broadcaster',
-        name='imu_tf_broadcaster',
-        parameters=[{
-            'base_frame': 'base_link',
-            'imu_frame': 'imu_link'
-        }],
-        output='screen'
+        output='screen',
+        respawn=True,
+        respawn_delay=1
     )
     
     # Static TF publisher for base_link to world
@@ -77,11 +71,24 @@ def generate_launch_description():
         executable='robot_state_publisher',
         name='robot_state_publisher',
         parameters=[{
-            'robot_description': get_robot_description()
+            'robot_description': get_robot_description(),
+            'publish_frequency': 50.0
         }]
     )
     
-    # RVIZ Node
+    # IMU TF Broadcaster Node
+    imu_tf_broadcaster_node = Node(
+        package='ros2_imu_package',
+        executable='imu_tf_broadcaster',
+        name='imu_tf_broadcaster',
+        parameters=[{
+            'base_frame': 'base_link',
+            'imu_frame': 'imu_link'
+        }],
+        output='screen'
+    )
+    
+    # RVIZ Node - start after delay to ensure other nodes are ready
     rviz_config_path = PathJoinSubstitution([
         FindPackageShare('ros2_imu_package'),
         'config',
@@ -97,15 +104,26 @@ def generate_launch_description():
         output='screen'
     )
     
+    # Delay RViz start
+    delayed_rviz = TimerAction(
+        period=3.0,  # 3 second delay
+        actions=[rviz_node]
+    )
+    
+    # Return launch description with ordered node startup
     return LaunchDescription([
         serial_port_arg,
         baudrate_arg,
         use_rviz_arg,
+        # Start static transforms first
         static_tf_publisher,
+        # Then robot state publisher
         robot_state_publisher,
+        # Start IMU nodes
         imu_reader_node,
         imu_tf_broadcaster_node,
-        rviz_node
+        # Finally start RViz with delay
+        delayed_rviz
     ])
 
 

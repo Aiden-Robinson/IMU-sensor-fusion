@@ -10,10 +10,20 @@ services:
       - DISPLAY=${DISPLAY}
       - SERIAL_PORT=${SERIAL_PORT:-/dev/ttyACM0}
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - PYTHONUNBUFFERED=1  # Ensure Python output is not buffered
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - /dev:/dev  # Mount device directory for serial access
     devices:
-      - /dev/ttyACM0:/dev/ttyACM0  # Mount specific serial device (change as needed)
+      - "${SERIAL_PORT}:${SERIAL_PORT}"  # Mount the specified serial device
     stdin_open: true
     tty: true
+    command: >
+      bash -c "
+        echo 'Waiting for serial port...' &&
+        while [ ! -e ${SERIAL_PORT} ]; do sleep 1; done &&
+        echo 'Serial port found!' &&
+        ls -l ${SERIAL_PORT} &&
+        echo 'Starting ROS2 nodes...' &&
+        /launch_imu.sh
+      "

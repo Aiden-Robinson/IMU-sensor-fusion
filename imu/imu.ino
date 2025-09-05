@@ -13,6 +13,9 @@
 
 // Kalman filter matrices (4x4 state: roll, pitch, roll_bias, pitch_bias)
 float x[4] = {0, 0, 0, 0};     // State vector [roll, pitch, roll_bias, pitch_bias]
+
+// Simple yaw integration
+float yaw = 0.0;
 float P[4][4];                  // Error covariance matrix
 float Q[4][4];                  // Process noise covariance
 float R[2][2];                  // Measurement noise covariance
@@ -35,7 +38,7 @@ void setup() {
   initKalmanFilter();
   
   Serial.println("Kalman Filter AHRS Ready");
-  Serial.println("Format: Roll,Pitch,AccelX,AccelY,AccelZ,GyroZ");
+  Serial.println("Format: Roll,Pitch,Yaw,AccelX,AccelY,AccelZ");
   
   lastTime = millis();
   delay(1000);
@@ -69,13 +72,33 @@ void loop() {
   // Kalman filter update step
   kalmanUpdate(roll_accel, pitch_accel);
   
-  // Output results
+  // Integrate gyro Z for yaw
+  yaw += gz * dt;
+  
+  // Keep yaw between -180 and 180 degrees
+  if (yaw > 180) yaw -= 360;
+  else if (yaw < -180) yaw += 360;
+  
+  // Output results with debug info every second
+  static unsigned long lastDebugTime = 0;
+  if (currentTime - lastDebugTime >= 1000) {  // Every 1 second
+    Serial.println("DEBUG INFO:");
+    Serial.print("Raw Gyro (deg/s) - X: "); Serial.print(gx);
+    Serial.print(" Y: "); Serial.print(gy);
+    Serial.print(" Z: "); Serial.println(gz);
+    Serial.print("Raw Accel (g) - X: "); Serial.print(ax);
+    Serial.print(" Y: "); Serial.print(ay);
+    Serial.print(" Z: "); Serial.println(az);
+    lastDebugTime = currentTime;
+  }
+  
+  // Regular data output
   Serial.print(x[0], 2);  Serial.print(",");  // Filtered roll
   Serial.print(x[1], 2);  Serial.print(",");  // Filtered pitch
+  Serial.print(yaw, 2);   Serial.print(",");  // Integrated yaw
   Serial.print(ax, 3);    Serial.print(",");  // Raw accel X
   Serial.print(ay, 3);    Serial.print(",");  // Raw accel Y
-  Serial.print(az, 3);    Serial.print(",");  // Raw accel Z
-  Serial.println(gz, 3);                      // Raw gyro Z for yaw rate
+  Serial.println(az, 3);                      // Raw accel Z
   
   delay(20);  // 50Hz
 }
