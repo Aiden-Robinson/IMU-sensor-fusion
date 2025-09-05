@@ -4,10 +4,7 @@ A portfolio project demonstrating real-time sensor fusion and 3D visualization u
 
 ## Demo Video
 
-<video src="IMU.mp4" controls width="600">
-  Your browser does not support the video tag.  
-  [Download the demo video](IMU.mp4)
-</video>
+https://github.com/user-attachments/assets/320ea084-6b7b-444e-82cf-7f2acc84bc24
 
 ## What It Does
 
